@@ -117,51 +117,107 @@
       [_ (error prog "invalid format")]
       )))
 
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;; finalize-locations
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+(define empty-env '())
+
+(define look-up
+  (lambda (x env)
+    (if (null? env)
+        (error "Not exist in env" x)
+        (if (eqv? x (caar env))
+            (cadar env)
+            (look-up x (cdr env))))))
+
+(define my-map-1
+  (lambda (f lst env)
+    (if (null? lst)
+        '()
+        (cons (f (car lst) env) (my-map-1 f (cdr lst) env)))))
+
+(define finalize-locations-Label
+  (lambda (li env)
+    (match li
+      [`(,l (lambda () ,b))
+       `(,l (lambda () ,(finalize-locations-Body b env)))])))
+
+(define finalize-locations-Body
+  (lambda (b env)
+    (match b
+      [`(locate ,uvar-loc-list ,t)
+       (finalize-locations-Tail t (append uvar-loc-list env))])))
+
+(define finalize-locations-Tail
+  (lambda (t env)
+    (match t
+      [`(begin ,effects ... ,tail)
+       `(begin ,@(my-map-1 finalize-locations-Effect effects env) ,(finalize-locations-Tail tail env))]
+      [`(if ,p ,t1 ,t2)
+       `(if ,(finalize-locations-Pred p env) ,(finalize-locations-Tail t1 env) ,(finalize-locations-Tail t2 env))]
+      [`(,triv)
+       `(,(finalize-locations-Triv triv env))]
+      )))
+
+(define finalize-locations-Pred
+  (lambda (p env)
+    (match p
+      [`(true) p]
+      [`(false) p]
+      [`(,relop ,t1 ,t2) #:when (set-member? primitives relop)
+       `(,relop ,(finalize-locations-Triv t1 env),(finalize-locations-Triv t2 env))]
+      [`(if ,p ,pthn ,pels)
+       `(if ,(finalize-locations-Pred p env) ,(finalize-locations-Pred pthn env) ,(finalize-locations-Pred pels env))]
+      [`(begin ,es ... ,p)
+       `(begin ,@(my-map-1 finalize-locations-Effect es env) ,(finalize-locations-Pred p env))])))
+
+(define finalize-locations-Effect
+  (lambda (e env)
+    (match e
+      [`(nop) e]
+      [`(set! ,v (,op ,t1 ,t2))
+       `(set! ,(finalize-locations-Var v env) (,op ,(finalize-locations-Triv t1 env) ,(finalize-locations-Triv t2 env)))]
+      [`(set! ,v ,t)
+       `(set! ,(finalize-locations-Var v env) ,(finalize-locations-Triv t env))]
+      [`(if ,p ,e1 ,e2)
+       `(if ,(finalize-locations-Pred p env) ,(finalize-locations-Effect e1 env) ,(finalize-locations-Effect e2 env))]
+      [`(begin ,es ... ,e)
+       `(begin ,@(my-map-1 finalize-locations-Effect es env) ,(finalize-locations-Effect e))]
+      )))
+
+(define finalize-locations-Var
+  (lambda (v env)
+    (if (regexp-match #rx"\\.[0-9]+$" (symbol->string v))
+        (look-up v env)
+        v)))
+
+(define finalize-locations-Triv
+  (lambda (t env)
+    (if (or (integer? t) (is-label? t))
+        t
+        (finalize-locations-Var t env))))
+
+(define finalize-locations
+  (lambda (prog)
+    (match prog
+      [`(letrec (,label-instrs ...) ,b)
+       `(letrec ,(my-map-1 finalize-locations-Label label-instrs empty-env) ,(finalize-locations-Body b empty-env))])))
+
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; expose-frame-var
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-(define expose-frame-var-Label
-  (lambda (li)
-    (match li
-      [`(,l (lambda () ,tail))
-       `(,l (lambda () ,(expose-frame-var-Tail tail)))])))
-
-(define expose-frame-var-Tail
-  (lambda (t)
-    (match t
-      [`(begin ,effects ... ,tail)
-       `(begin ,@(map expose-frame-var-Effect effects) ,(expose-frame-var-Tail tail))]
-      [`(,triv)
-       `(,(expose-frame-var-Triv triv))]
-      )))
-
-(define expose-frame-var-Effect
-  (lambda (e)
-    (match e
-      [`(set! ,v (,op ,t1 ,t2))
-       `(set! ,(expose-frame-var-Var v) (,op ,(expose-frame-var-Triv t1) ,(expose-frame-var-Triv t2)))]
-      [`(set! ,v ,t)
-       `(set! ,(expose-frame-var-Var v) ,(expose-frame-var-Triv t))]
-      )))
-
 (define expose-frame-var-Var
   (lambda (v)
-    (if (is-reg? v)
-        v
-        `(disp rbp ,(string->number (car (regexp-match #rx"[0-9]+$" (symbol->string v))))))))
-
-(define expose-frame-var-Triv
-  (lambda (t)
-    (if (or (integer? t) (is-label? t))
-        t
-        (expose-frame-var-Var t))))
+    (if (and (symbol? v) (regexp-match #rx"f\\$[0-9]+$" (symbol->string v)))
+        `(disp rbp ,(string->number (car (regexp-match #rx"[0-9]+$" (symbol->string v)))))
+        v)))
 
 (define expose-frame-var
   (lambda (prog)
-    (match prog
-      [`(letrec (,label-instrs ...) ,tail)
-       `(letrec ,(map expose-frame-var-Label label-instrs) ,(expose-frame-var-Tail tail))])))
+    (if (list? prog)
+        (map expose-frame-var prog)
+        (expose-frame-var-Var prog))))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; flatten-program
@@ -220,15 +276,16 @@
 ;    (with-output-to-file "t.s" (lambda ()
 ;                                 (generate-x86-64 (verify-scheme program))))))
 
-(flatten-program
 (expose-frame-var
-'(letrec ([f$1 (lambda ()
-                (begin
-                 
-                  (set! fv0 rax)
-                  (set! rax (+ rax rax))
-                  (set! rax (+ rax fv0))
-                  (r15)))])
-  (begin
-    (set! rax 17)
-    (f$1)))))
+(finalize-locations
+`(letrec ([f$1 (lambda ()
+                  (locate ([x.1 r8] [y.2 r9])
+                          (if (if (= x.1 1) (true) (> y.2 1000))
+                              (begin (set! rax y.2) (r15))
+                              (begin
+                                (set! y.2 (* y.2 2))
+                                (set! rax x.1)
+                                (set! rax (logand rax 1))
+                                (if (= rax 0) (set! y.2 (+ y.2 1)) (nop)) (set! x.1 (sra x.1 1))
+                                (f$1)))))])
+          (locate () (begin (set! r8 3) (set! r9 10) (f$1))))))

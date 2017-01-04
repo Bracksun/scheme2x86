@@ -38,7 +38,7 @@
 
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-;;; verify-scheme
+;;; 4.1 verify-scheme
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 (define is-reg?
   (lambda (x)
@@ -118,8 +118,28 @@
       )))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-;;; finalize-locations
+;;; 4.2 finalize-locations
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+;;; A grammar for the output of this pass is shown below:
+
+;;; Program  ---> (letrec ([label (lambda () Tail)]*) Tail)
+;;; Tail     ---> (Triv)
+;;;            |  (if Pred Tail Tail)
+;;;            |  (begin Effect* Tail)
+;;; Pred     ---> (true)
+;;;            |  (false)
+;;;            |  (relop Triv Triv)
+;;;            |  (if Pred Pred Pred)
+;;;            |  (begin Effect* Pred)
+;;; Effect   ---> (nop)
+;;;            |  (set! Var Triv)
+;;;            |  (set! Var (binop Triv Triv))
+;;;            |  (if Pred Effect Effect)
+;;;            |  (begin Effect* Effect)
+;;; Loc      ---> reg | fvar
+;;; Triv     ---> Loc | int | label
+
 (define empty-env '())
 
 (define look-up
@@ -205,7 +225,7 @@
 
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-;;; expose-frame-var
+;;; 4.3 expose-frame-var (simple tree search)
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 (define expose-frame-var-Var
   (lambda (v)
@@ -218,6 +238,20 @@
     (if (list? prog)
         (map expose-frame-var prog)
         (expose-frame-var-Var prog))))
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;; 4.4 expose-basic-blocks
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+;;; A grammar for the output of this pass is shown below:
+
+;;; Program  ---> (letrec ([label (lambda () Tail)]*) Tail)
+;;; Tail     ---> (Triv)
+;;;            |  (if (relop Triv Triv) (,label) (,label))
+;;;            |  (begin Effect* Tail)
+;;; Effect   ---> (set! Loc Triv)
+;;;            |  (set! Loc (binop Triv Triv))
+;;; Loc      ---> reg | dis-opnd
+;;; Triv     ---> Loc | int | label
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; flatten-program

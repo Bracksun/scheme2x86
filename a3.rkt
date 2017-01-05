@@ -35,7 +35,10 @@
 (define primitives (set '* '+ '- '< '<= '= '>= '> 'add1 'sub1 'zero? 'boolean? 'integer? 'null?
                         'pair? 'procedure? 'vector? 'not 'eq? 'cons 'car 'cdr 'set-car! 'set-cdr!
                         'make-vector 'vector-length 'vector-ref 'vector-set! 'void))
-
+(define uvar-pat "\\.[0-9]+")
+(define label-pat "\\$[0-9]+")
+(define fvar-pat "fv[0-9]")
+(define label-prefix-list `("a" "c" "f" "j"))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; 4.1 verify-scheme
@@ -229,7 +232,7 @@
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 (define expose-frame-var-Var
   (lambda (v)
-    (if (and (symbol? v) (regexp-match #rx"f\\$[0-9]+$" (symbol->string v)))
+    (if (and (symbol? v) (regexp-match #rx"fv[0-9]+$" (symbol->string v)))
         `(disp rbp ,(string->number (car (regexp-match #rx"[0-9]+$" (symbol->string v)))))
         v)))
 
@@ -252,6 +255,80 @@
 ;;;            |  (set! Loc (binop Triv Triv))
 ;;; Loc      ---> reg | dis-opnd
 ;;; Triv     ---> Loc | int | label
+
+; helper function -- label-generate
+(define n 1)
+(define label-generate
+  (lambda ()
+    (let ([len (length label-prefix-list)])
+      (set! n (+ n 1))
+      (string->symbol (string-append (list-ref label-prefix-list (random len))
+                                     "$" (number->string n))))))
+;; Main part
+(define expose-basic-blocks-Label
+  (lambda (li env)
+    (match li
+      [`(,lname (lambda () ,tail))
+       `(,lname (lambda () ,(expose-basic-blocks-Body b env)))])))
+
+(define expose-basic-blocks-Body
+  (lambda (b env)
+    (match b
+      [`(locate ,uvar-loc-list ,t)
+       (expose-basic-blocks-Tail t (append uvar-loc-list env))])))
+
+(define expose-basic-blocks-Tail
+  (lambda (t env)
+    (match t
+      [`(begin ,effects ... ,tail)
+       `(begin ,@(my-map-1 expose-basic-blocks-Effect effects env) ,(expose-basic-blocks-Tail tail env))]
+      [`(if ,p ,t1 ,t2)
+       `(if ,(expose-basic-blocks-Pred p env) ,(expose-basic-blocks-Tail t1 env) ,(expose-basic-blocks-Tail t2 env))]
+      [`(,triv)
+       `(,(expose-basic-blocks-Triv triv env))]
+      )))
+
+(define expose-basic-blocks-Pred
+  (lambda (p env)
+    (match p
+      [`(true) p]
+      [`(false) p]
+      [`(,relop ,t1 ,t2) #:when (set-member? primitives relop)
+       `(,relop ,(expose-basic-blocks-Triv t1 env),(expose-basic-blocks-Triv t2 env))]
+      [`(if ,p ,pthn ,pels)
+       `(if ,(expose-basic-blocks-Pred p env) ,(expose-basic-blocks-Pred pthn env) ,(expose-basic-blocks-Pred pels env))]
+      [`(begin ,es ... ,p)
+       `(begin ,@(my-map-1 expose-basic-blocks-Effect es env) ,(expose-basic-blocks-Pred p env))])))
+
+(define expose-basic-blocks-Effect
+  (lambda (e env)
+    (match e
+      [`(nop) '()]
+      [`(set! ,v (,op ,t1 ,t2))
+       `(set! ,(expose-basic-blocks-Loc v env) (,op ,(expose-basic-blocks-Triv t1 env) ,(expose-basic-blocks-Triv t2 env)))]
+      [`(set! ,v ,t)
+       `(set! ,(expose-basic-blocks-Loc v env) ,(expose-basic-blocks-Triv t env))]
+      [`(if ,p ,e1 ,e2)
+       `(if ,(expose-basic-blocks-Pred p env) ,(expose-basic-blocks-Effect e1 env) ,(expose-basic-blocks-Effect e2 env))]
+      [`(begin ,es ... ,e)
+       `(begin ,@(my-map-1 expose-basic-blocks-Effect es env) ,(expose-basic-blocks-Effect e))]
+      )))
+
+(define expose-basic-blocks-Loc
+  (lambda (t env)
+    t))
+
+;; No syntax check
+(define expose-basic-blocks-Triv
+  (lambda (t env)
+    t))
+
+(define expose-basic-blocks
+  (lambda (prog)
+    (match prog
+      [`(letrec (,label-instrs ...) ,b)
+       `(letrec ,(my-map-1 expose-basic-blocks-Label label-instrs empty-env) ,(expose-basic-blocks-Body b empty-env))])))
+      
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; flatten-program

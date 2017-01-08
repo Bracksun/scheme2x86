@@ -269,13 +269,7 @@
   (lambda (li env)
     (match li
       [`(,lname (lambda () ,tail))
-       `(,lname (lambda () ,(expose-basic-blocks-Body b env)))])))
-
-(define expose-basic-blocks-Body
-  (lambda (b env)
-    (match b
-      [`(locate ,uvar-loc-list ,t)
-       (expose-basic-blocks-Tail t (append uvar-loc-list env))])))
+       `(,lname (lambda () ,(expose-basic-blocks-Body tail env)))])))
 
 (define expose-basic-blocks-Tail
   (lambda (t env)
@@ -283,7 +277,15 @@
       [`(begin ,effects ... ,tail)
        `(begin ,@(my-map-1 expose-basic-blocks-Effect effects env) ,(expose-basic-blocks-Tail tail env))]
       [`(if ,p ,t1 ,t2)
-       `(if ,(expose-basic-blocks-Pred p env) ,(expose-basic-blocks-Tail t1 env) ,(expose-basic-blocks-Tail t2 env))]
+       (let* ([label1 (label-generate)]
+              [label2 (label-generate)]
+              [t1-label-instr `(,label1 (lambda () ,(expose-basic-blocks-Tail t1 env)))]
+              [t2-label-instr `(,label2 (lambda () ,(expose-basic-blocks-Tail t2 env)))])
+         (match p
+           [`(true) (expose-basic-blocks-Tail t1 env)]
+           [`(false) (expose-basic-blocks-Tail t2 env)]
+           [`(if ,pcnd ,pthn ,pels) (expose-basic-blocks-Tail `(if ,pcnd (if ,pthn ,t1 ,t2) (if ,pels ,t1 ,t2)))]
+           [`(begin ,es ... ,pr) (expose-basic-blocks-Effect `(begin ,@es (if ,pr ,t1 ,t2)))]))]
       [`(,triv)
        `(,(expose-basic-blocks-Triv triv env))]
       )))

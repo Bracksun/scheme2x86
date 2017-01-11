@@ -266,72 +266,86 @@
                                      "$" (number->string n))))))
 ;; Main part
 (define expose-basic-blocks-Label
-  (lambda (li env)
+  (lambda (li)
     (match li
-      [`(,lname (lambda () ,tail))
-       `(,lname (lambda () ,(expose-basic-blocks-Body tail env)))])))
+      [`(,lname (lambda () ,t))
+       (let-values ([(ret bindings) (expose-basic-blocks-Tail t)])
+         `((,lname (lambda () ,ret)) ,@bindings))])))
 
+
+;; Tail
+;; return -- value pair: new-tail && new-bindings
 (define expose-basic-blocks-Tail
-  (lambda (t env)
-    (match t
-      [`(begin ,effects ... ,tail)
-       `(begin ,@(my-map-1 expose-basic-blocks-Effect effects env) ,(expose-basic-blocks-Tail tail env))]
-      [`(if ,p ,t1 ,t2)
-       (let* ([label1 (label-generate)]
-              [label2 (label-generate)]
-              [t1-label-instr `(,label1 (lambda () ,(expose-basic-blocks-Tail t1 env)))]
-              [t2-label-instr `(,label2 (lambda () ,(expose-basic-blocks-Tail t2 env)))])
-         (match p
-           [`(true) (expose-basic-blocks-Tail t1 env)]
-           [`(false) (expose-basic-blocks-Tail t2 env)]
-           [`(if ,pcnd ,pthn ,pels) (expose-basic-blocks-Tail `(if ,pcnd (if ,pthn ,t1 ,t2) (if ,pels ,t1 ,t2)))]
-           [`(begin ,es ... ,pr) (expose-basic-blocks-Effect `(begin ,@es (if ,pr ,t1 ,t2)))]))]
-      [`(,triv)
-       `(,(expose-basic-blocks-Triv triv env))]
-      )))
+  (lambda (t)
+       (match t
+         [`(begin ,effects ... ,tail)
+          (let-values ([(effs label-bindings) (expose-basic-blocks-Effects `(,@effects ,tail))])
+            (values (if (eq? 1 (length effs)) (car effs) `(begin ,@effs))
+                    label-bindings))]
+         [`(if ,p ,t1 ,t2)
+          (let* ([label1 (if (is-label? (car t1)) (car t1) (label-generate))]
+                 [label2 (if (is-label? (car t2)) (car t2) (label-generate))]
+                 [t1-label-binding (if (is-label? (car t1)) '() (expose-basic-blocks-Label `(,label1 (lambda () ,t1))))]
+                 [t2-label-binding (if (is-label? (car t2)) '() (expose-basic-blocks-Label `(,label2 (lambda () ,t2))))])
+            (match p
+              [`(true) (values `(,label1) t1-label-binding)]
+              [`(false) (values `(,label2) t2-label-binding)]
+              [`(if ,pcnd ,pthn ,pels)
+               (let ([thn-label (label-generate)]
+                     [els-label (label-generate)])
+                 (let-values ([(t-ret bindings) (expose-basic-blocks-Tail `(if ,pcnd (,thn-label) (,els-label)))])
+                   (values t-ret
+                           `(,@bindings
+                             ,@(expose-basic-blocks-Label `(,thn-label (lambda () (if ,pthn (,label1) (,label2)))))
+                             ,@(expose-basic-blocks-Label `(,els-label (lambda () (if ,pels (,label1) (,label2)))))
+                             ,@t1-label-binding ,@t2-label-binding))))]
+              [`(begin ,es ... ,pr)
+               (let ([pred-label (label-generate)])
+                 (let-values ([(ret bindings) (expose-basic-blocks-Tail `(begin ,@es (,pred-label)))])
+                   (values ret `(,bindings
+                                 ,@(expose-basic-blocks-Label `(,pred-label (lambda () (if ,pr (,label1) (,label2)))))
+                                 ,@t1-label-binding ,@t2-label-binding))))]
+              [`(,relop ,triv1 ,triv2)
+               (values `(if ,p (,label1) (,label2)) `(,@t1-label-binding ,@t2-label-binding))]))]
+         [`(,triv) #:when (is-label? triv)
+          (values `(,triv) '())]
+         )))
 
-(define expose-basic-blocks-Pred
-  (lambda (p env)
-    (match p
-      [`(true) p]
-      [`(false) p]
-      [`(,relop ,t1 ,t2) #:when (set-member? primitives relop)
-       `(,relop ,(expose-basic-blocks-Triv t1 env),(expose-basic-blocks-Triv t2 env))]
-      [`(if ,p ,pthn ,pels)
-       `(if ,(expose-basic-blocks-Pred p env) ,(expose-basic-blocks-Pred pthn env) ,(expose-basic-blocks-Pred pels env))]
-      [`(begin ,es ... ,p)
-       `(begin ,@(my-map-1 expose-basic-blocks-Effect es env) ,(expose-basic-blocks-Pred p env))])))
+;; flatten effects
+;; return -- value pair: rest of effects && label instructions
+(define expose-basic-blocks-Effects
+  (lambda (tail-effect)
+    (match tail-effect
+      [`(,es ... ,tail)
+       (if (null? es)
+           (values `(,tail) '())
+           (match (car es)
+             [`(nop) (expose-basic-blocks-Effects `(,@(cdr es) ,tail))]
+             [`(set! ,v (,op ,t1 ,t2))
+              (let-values ([(e-rest label-binding) (expose-basic-blocks-Effects `(,@(cdr es) ,tail))])
+                (values (cons (car es) e-rest) label-binding))]
+             [`(set! ,v ,t)
+              (let-values ([(e-rest label-binding) (expose-basic-blocks-Effects `(,@(cdr es) ,tail))])
+                (values (cons (car es) e-rest) label-binding))]
+             [`(if ,p ,e1 ,e2)
+              (let ([e1-label (label-generate)]
+                    [e2-label (label-generate)]
+                    [rest-label (label-generate)])
+                (values `((if ,p (,e1-label) (,e2-label)))
+                         (append (expose-basic-blocks-Label `(,e1-label (lambda () (begin ,e1 (,rest-label)))))
+                                 (expose-basic-blocks-Label `(,e2-label (lambda () (begin ,e2 (,rest-label)))))
+                                 (expose-basic-blocks-Label `(,rest-label (lambda () (begin ,@(cdr es) ,tail)))))))]
+             [`(begin ,effs ... ,e)
+              (expose-basic-blocks-Effects `(,@effs ,e ,@(cdr es) ,tail))]))])))
 
-(define expose-basic-blocks-Effect
-  (lambda (e env)
-    (match e
-      [`(nop) '()]
-      [`(set! ,v (,op ,t1 ,t2))
-       `(set! ,(expose-basic-blocks-Loc v env) (,op ,(expose-basic-blocks-Triv t1 env) ,(expose-basic-blocks-Triv t2 env)))]
-      [`(set! ,v ,t)
-       `(set! ,(expose-basic-blocks-Loc v env) ,(expose-basic-blocks-Triv t env))]
-      [`(if ,p ,e1 ,e2)
-       `(if ,(expose-basic-blocks-Pred p env) ,(expose-basic-blocks-Effect e1 env) ,(expose-basic-blocks-Effect e2 env))]
-      [`(begin ,es ... ,e)
-       `(begin ,@(my-map-1 expose-basic-blocks-Effect es env) ,(expose-basic-blocks-Effect e))]
-      )))
-
-(define expose-basic-blocks-Loc
-  (lambda (t env)
-    t))
-
-;; No syntax check
-(define expose-basic-blocks-Triv
-  (lambda (t env)
-    t))
 
 (define expose-basic-blocks
   (lambda (prog)
     (match prog
-      [`(letrec (,label-instrs ...) ,b)
-       `(letrec ,(my-map-1 expose-basic-blocks-Label label-instrs empty-env) ,(expose-basic-blocks-Body b empty-env))])))
-      
-
+      [`(letrec (,label-instrs ...) ,tail)
+       (let-values ([(ret tbindings) (expose-basic-blocks-Tail tail)])
+       `(letrec ,(append (car (map expose-basic-blocks-Label label-instrs)) tbindings) ,ret))])))
+     
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; flatten-program
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;

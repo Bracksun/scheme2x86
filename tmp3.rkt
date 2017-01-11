@@ -115,7 +115,43 @@
       [`(letrec (,label-instrs ...) ,tail)
        (let-values ([(ret tbindings) (expose-basic-blocks-Tail tail)])
        `(letrec ,(append (car (map expose-basic-blocks-Label label-instrs)) tbindings) ,ret))])))
-      
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;; flatten-program
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+(define flatten-program-Label
+  (lambda (li)
+    (match li
+      [`(,lname (lambda () ,tail))
+       `(,lname ,@(flatten-program-Tail tail))])))
+
+(define flatten-program-Tail
+  (lambda (t)
+    (match t
+      [`(begin ,effects ... ,tail)
+       `(,@effects ,@(flatten-program-Tail tail))]
+      [`(,triv)
+       `((jump ,triv))]
+      [`(if ,p (,l1) (,l2))
+       `((if ,p (jump ,l1)) (jump ,l2))]
+      )))
+
+(define flatten-program
+  (lambda (prog)
+    (match prog
+      [`(letrec (,label-instrs ...) ,tail)
+       `(code ,@(flatten-program-Tail tail) ,@(my-map flatten-program-Label label-instrs) )])))
+
+(define my-map
+  (lambda (f lst)
+    (if (null? lst)
+        '()
+        (append (f (car lst)) (my-map f (cdr lst))))))
+
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;;; Test
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;(expose-basic-blocks
 ; '(letrec ([f$1
 ;           (lambda ()
@@ -130,16 +166,27 @@
 ;                 (f$1))))])
 ;   (begin (set! r8 3) (set! r9 10) (f$1))))
 
-(expose-basic-blocks
- '(letrec ([f$1
-           (lambda ()
-             (if (if (= r8 1) (true) (> r9 1000))
-               (begin (set! rax r9) (r15))
-               (begin
-                 (set! r9 (* r9 2))
-                 (set! rax r8)
-                 (set! rax (logand rax 1))
-                 (if (= rax 0) (set! r9 (+ r9 1)) (nop))
-                 (set! r8 (sra r8 1))
-                 (f$1))))])
-   (begin (set! r8 3) (set! r9 10) (if (= rax 0) (set! r9 (+ r9 1)) (nop)) (f$1))))
+;(expose-basic-blocks
+; '(letrec ([f$1
+;           (lambda ()
+;             (if (if (= r8 1) (true) (> r9 1000))
+;               (begin (set! rax r9) (r15))
+;               (begin
+;                 (set! r9 (* r9 2))
+;                 (set! rax r8)
+;                 (set! rax (logand rax 1))
+;                 (if (= rax 0) (set! r9 (+ r9 1)) (nop))
+;                 (set! r8 (sra r8 1))
+;                 (f$1))))])
+;   (begin (set! r8 3) (set! r9 10) (if (= rax 0) (set! r9 (+ r9 1)) (nop)) (f$1))))
+
+(flatten-program
+ '(letrec ((f$1 (lambda () (if (= r8 1) (f$7) (j$8))))
+          (f$7 (lambda () (c$2)))
+          (j$8 (lambda () (if (> r9 1000) (c$2) (f$3))))
+          (c$2 (lambda () (begin (set! rax r9) (r15))))
+          (f$3 (lambda () (begin (set! r9 (* r9 2)) (set! rax r8) (set! rax (logand rax 1)) (if (= rax 0) (a$4) (a$5)))))
+          (a$4 (lambda () (begin (set! r9 (+ r9 1)) (f$6))))
+          (a$5 (lambda () (f$6)))
+          (f$6 (lambda () (begin (set! r8 (sra r8 1)) (f$1)))))
+   (begin (set! r8 3) (set! r9 10) (f$1))))
